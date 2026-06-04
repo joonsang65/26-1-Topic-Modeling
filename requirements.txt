@@ -8,6 +8,7 @@ gensim
 pyLDAvis
 bitermplus
 openpyxl
+optuna
 nltk
 numpy
 scipy

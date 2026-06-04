@@ -26,6 +26,8 @@ import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import seaborn as sns
 from tqdm import tqdm
+import optuna
+from scipy import sparse
 
 warnings.filterwarnings("ignore")
 
@@ -33,17 +35,19 @@ warnings.filterwarnings("ignore")
 # 0. 설정값 (필요에 따라 수정)
 # ─────────────────────────────────────────────
 DATA_DIR    = os.path.join("data", "processed")
+# 사용자가 명시한 특정 파일 경로
+TARGET_FILE = os.path.join(DATA_DIR, "최종정제_v2.csv")
 OUTPUT_DIR  = os.path.join("results", "modeling_results", "BTM")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# K 탐색 범위
-K_START     = 2
-K_END       = 15
-K_STEP      = 1
+# Optuna 탐색 설정
+N_TRIALS    = 30       # Optuna 시도 횟수
+K_MIN       = 2
+K_MAX       = 15
+ALPHA_MIN, ALPHA_MAX = 0.01, 5.0
+BETA_MIN,  BETA_MAX  = 0.001, 1.0
 
-# BTM 하이퍼파라미터
-ALPHA       = 1.0      # 토픽 분포 디리클레 파라미터 (문서-토픽)
-BETA        = 0.01     # 단어 분포 디리클레 파라미터 (토픽-단어)
+# BTM 기본 설정
 N_ITER      = 200      # 깁스 샘플링 반복 수
 
 # 한글 폰트 설정
@@ -91,8 +95,14 @@ def _best_text_column(df: pd.DataFrame) -> str:
 
 def load_documents(data_dir: str) -> list:
     all_docs = []
-    files = [f for f in os.listdir(data_dir)
-             if f.lower().endswith((".csv", ".txt", ".xlsx", ".xls"))]
+    
+    # 특정 타겟 파일이 존재하면 그것만 로드, 아니면 전체 로드
+    if os.path.exists(TARGET_FILE):
+        files = [os.path.basename(TARGET_FILE)]
+    else:
+        files = [f for f in os.listdir(data_dir)
+                 if f.lower().endswith((".csv", ".txt", ".xlsx", ".xls"))]
+    
     if not files:
         raise FileNotFoundError(f"'{data_dir}' 에 csv/txt/xlsx 파일이 없습니다.")
 
@@ -157,10 +167,10 @@ def build_vocab(docs: list, min_count: int = 2, max_ratio: float = 0.95):
 # 3. BTM 모델 학습 (bitermplus 사용)
 # ─────────────────────────────────────────────
 def train_btm(docs_filtered: list, vocab: dict, num_topics: int,
-              alpha=ALPHA, beta=BETA, n_iter=N_ITER):
+              alpha: float, beta: float, n_iter=N_ITER):
     """
     bitermplus 로 BTM 학습.
-    반환: (btm_model, biterms)
+    반환: (btm_model, docs_idx)
     """
     import bitermplus as btm
 
@@ -168,25 +178,37 @@ def train_btm(docs_filtered: list, vocab: dict, num_topics: int,
     docs_idx = [[vocab[w] for w in doc if w in vocab]
                 for doc in docs_filtered]
 
-    vocab_list = [None] * len(vocab)
+    vocab_list = np.array([None] * len(vocab), dtype=object)
     for w, i in vocab.items():
         vocab_list[i] = w
 
-    # BTM 인스턴스 생성 및 학습
+    # 1. CSR Matrix 생성 (Document-Term Matrix)
+    rows, cols, data = [], [], []
+    for i, doc in enumerate(docs_idx):
+        for word_id in doc:
+            rows.append(i)
+            cols.append(word_id)
+            data.append(1)
+    X = sparse.csr_matrix((data, (rows, cols)), shape=(len(docs_idx), len(vocab)))
+
+    # 2. Biterms 추출
+    biterms = btm.get_biterms(docs_idx)
+
+    # 3. BTM 인스턴스 생성 및 학습
     model = btm.BTM(
-        X        = docs_idx,       # 문서 리스트 (단어 id)
-        vocabulary = vocab_list,   # 어휘 리스트
-        T        = num_topics,     # 토픽 수
-        M        = 20,             # 단어 pair 샘플링 윈도우
+        X, 
+        vocab_list, 
+        T        = num_topics, 
+        M        = 20,
         alpha    = alpha,
         beta     = beta,
     )
-    model.fit(docs_idx, iterations=n_iter)
+    model.fit(biterms, iterations=n_iter)
     return model, docs_idx
 
 
 # ─────────────────────────────────────────────
-# 4. 최적 K 탐색 - Perplexity & Topic Coherence
+# 4. 최적 파라미터 탐색 (Optuna)
 # ─────────────────────────────────────────────
 def _topic_coherence_btm(model, docs_idx: list, vocab: dict,
                          topn: int = 10) -> float:
@@ -194,7 +216,6 @@ def _topic_coherence_btm(model, docs_idx: list, vocab: dict,
     BTM 모델의 토픽 코히런스 계산 (UCI Pointwise MI 근사).
     공식: Coherence = mean over topics of mean PMI(w_i, w_j)
     """
-    import bitermplus as btm
     phi = model.matrix_words_topics_  # shape: (vocab, K)
 
     # 단어 공출현 빈도 계산
@@ -230,90 +251,100 @@ def _topic_coherence_btm(model, docs_idx: list, vocab: dict,
     return float(np.mean(coherences))
 
 
-def search_optimal_k_btm(docs_filtered: list, vocab: dict,
-                          k_start=K_START, k_end=K_END, k_step=K_STEP,
-                          alpha=ALPHA, beta=BETA, n_iter=N_ITER):
-    """
-    K를 변화시키며 Perplexity & Coherence 측정.
-    반환: (k_list, perplexity_list, coherence_list, best_k)
-    """
+# ─────────────────────────────────────────────
+# 4. 최적 파라미터 탐색 (2단계 Optuna)
+# ─────────────────────────────────────────────
+def find_best_k_sequential(docs_filtered: list, vocab: dict):
+    """1단계: 모든 K(2~15)에 대해 순차 탐색하여 엘보우 그래프 생성"""
     import bitermplus as btm
+    import random
 
-    docs_idx = [[vocab[w] for w in doc if w in vocab]
-                for doc in docs_filtered]
-    vocab_list = [None] * len(vocab)
-    for w, i in vocab.items():
-        vocab_list[i] = w
+    sample_size = min(len(docs_filtered), 10000)
+    docs_sample = random.sample(docs_filtered, sample_size)
+    docs_idx_sample = [[vocab[w] for w in doc if w in vocab] for doc in docs_sample]
+    
+    vocab_list = np.array([None] * len(vocab), dtype=object)
+    for w, i in vocab.items(): vocab_list[i] = w
 
-    k_list      = list(range(k_start, k_end + 1, k_step))
-    perplexities = []
-    coherences   = []
+    rows, cols, data = [], [], []
+    for i, doc in enumerate(docs_idx_sample):
+        for word_id in doc:
+            rows.append(i); cols.append(word_id); data.append(1)
+    X_sample = sparse.csr_matrix((data, (rows, cols)), shape=(len(docs_idx_sample), len(vocab)))
+    biterms_sample = btm.get_biterms(docs_idx_sample)
 
-    print(f"\n[ BTM K 탐색 ] 범위: {k_start} ~ {k_end}")
-    for k in tqdm(k_list, desc="BTM K 탐색"):
-        model = btm.BTM(
-            X         = docs_idx,
-            vocabulary= vocab_list,
-            T         = k,
-            M         = 20,
-            alpha     = alpha,
-            beta      = beta,
-        )
-        model.fit(docs_idx, iterations=n_iter)
+    k_values = list(range(K_MIN, K_MAX + 1))
+    coherences = []
 
-        # Perplexity (낮을수록 좋음)
-        try:
-            ppl = model.perplexity_
-        except Exception:
-            ppl = np.nan
-
-        # Coherence (높을수록 좋음)
-        coh = _topic_coherence_btm(model, docs_idx, vocab, topn=10)
-
-        perplexities.append(ppl)
+    print(f"\n[ 1단계: K 전수 조사 ] (범위: {K_MIN} ~ {K_MAX})")
+    for k in tqdm(k_values, desc="K 탐색 중"):
+        model = btm.BTM(X_sample, vocab_list, T=k, M=20, alpha=0.1, beta=0.01)
+        model.fit(biterms_sample, iterations=100)
+        coh = _topic_coherence_btm(model, docs_idx_sample, vocab, topn=10)
         coherences.append(coh)
 
-    # ── 최적 K: Coherence 최대
-    valid_coh  = [(i, c) for i, c in enumerate(coherences) if not np.isnan(c)]
-    best_idx   = max(valid_coh, key=lambda x: x[1])[0]
-    best_k     = k_list[best_idx]
+    # ── 시각화 (엘보우 그래프)
+    plt.figure(figsize=(8, 5))
+    plt.plot(k_values, coherences, marker='o', color='steelblue', linewidth=2)
+    
+    # 최고점 표시
+    best_idx = np.argmax(coherences)
+    best_k = k_values[best_idx]
+    plt.axvline(best_k, color='tomato', linestyle='--', label=f'Best K (Peak): {best_k}')
+    
+    plt.title("BTM: K vs Topic Coherence (Elbow Analysis)", fontsize=13)
+    plt.xlabel("Number of Topics (K)", fontsize=11)
+    plt.ylabel("Coherence Score", fontsize=11)
+    plt.xticks(k_values)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    save_path = os.path.join(OUTPUT_DIR, "BTM_K_elbow_plot.png")
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"  → 엘보우 그래프 저장: {save_path}")
 
-    print(f"\nK별 결과:")
-    for k, ppl, coh in zip(k_list, perplexities, coherences):
-        marker = " ← 최적(Coherence)" if k == best_k else ""
-        print(f"  K={k:2d}  Perplexity={ppl:.2f}  Coherence={coh:.4f}{marker}")
+    print(f"  → 최고 Coherence 기반 자동 선택된 K: {best_k}")
+    return best_k
 
-    # ── 시각화 저장
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
 
-    # Perplexity
-    valid_ppl = [(k_list[i], v) for i, v in enumerate(perplexities)
-                 if not np.isnan(v)]
-    if valid_ppl:
-        kk, vv = zip(*valid_ppl)
-        axes[0].plot(kk, vv, marker="o", color="tomato")
-        axes[0].set_xlabel("토픽 수 (K)", fontsize=11)
-        axes[0].set_ylabel("Perplexity", fontsize=11)
-        axes[0].set_title("BTM: K별 Perplexity", fontsize=12)
-        axes[0].grid(True, alpha=0.3)
+def tune_hyperparams_optuna(best_k, docs_filtered: list, vocab: dict, n_trials=20):
+    """2단계: 결정된 K에 대해 낮은 alpha, beta 위주로 튜닝"""
+    import bitermplus as btm
+    import random
 
-    # Coherence
-    axes[1].plot(k_list, coherences, marker="o", color="steelblue")
-    axes[1].axvline(best_k, color="tomato", linestyle="--",
-                    label=f"Best K={best_k}")
-    axes[1].set_xlabel("토픽 수 (K)", fontsize=11)
-    axes[1].set_ylabel("Coherence (PMI)", fontsize=11)
-    axes[1].set_title("BTM: K별 Coherence", fontsize=12)
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+    sample_size = min(len(docs_filtered), 10000)
+    docs_sample = random.sample(docs_filtered, sample_size)
+    docs_idx_sample = [[vocab[w] for w in doc if w in vocab] for doc in docs_sample]
+    
+    vocab_list = np.array([None] * len(vocab), dtype=object)
+    for w, i in vocab.items(): vocab_list[i] = w
 
-    plt.tight_layout()
-    save_path = os.path.join(OUTPUT_DIR, "BTM_K_search.png")
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"\n  → 저장: {save_path}")
+    rows, cols, data = [], [], []
+    for i, doc in enumerate(docs_idx_sample):
+        for word_id in doc:
+            rows.append(i); cols.append(word_id); data.append(1)
+    X_sample = sparse.csr_matrix((data, (rows, cols)), shape=(len(docs_idx_sample), len(vocab)))
+    biterms_sample = btm.get_biterms(docs_idx_sample)
 
-    return k_list, perplexities, coherences, best_k
+    def objective(trial):
+        # 낮은 값 위주로 탐색하기 위해 log=True 사용
+        alpha = trial.suggest_float("alpha", 0.001, 1.0, log=True)
+        beta  = trial.suggest_float("beta", 0.0001, 0.1, log=True)
+
+        model = btm.BTM(X_sample, vocab_list, T=best_k, M=20, alpha=alpha, beta=beta)
+        model.fit(biterms_sample, iterations=100)
+        
+        coh = _topic_coherence_btm(model, docs_idx_sample, vocab, topn=10)
+        
+        # '낮아지는 방향' 선호를 위해 아주 미세한 페널티 부여 (점수가 같으면 낮은 파라미터 선택)
+        return coh - (alpha * 1e-5) - (beta * 1e-4)
+
+    print(f"\n[ 2단계: 파라미터 튜닝 ] (K={best_k}, 시도: {n_trials}회)")
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True, n_jobs=-1)
+    
+    return study.best_params, study.best_value
 
 
 # ─────────────────────────────────────────────
@@ -341,11 +372,11 @@ def save_btm_topic_words(model, vocab: dict, best_k: int, topn: int = 20):
     return df
 
 
-def save_btm_document_topics(model, docs_idx: list, best_k: int):
+def save_btm_document_topics(model, docs_idx: list, vocab: dict, best_k: int):
     """각 문서의 토픽 분포를 CSV로 저장"""
     import bitermplus as btm
 
-    # 문서-토픽 분포 추론
+    # 문서-토픽 분포 추론 (bitermplus 0.10.0은 list 형식을 요구)
     theta = model.transform(docs_idx)   # shape: (n_docs, K)
 
     rows = []
@@ -449,7 +480,7 @@ def plot_btm_dominant_topic_dist(doc_topic_df: pd.DataFrame, best_k: int):
 # ─────────────────────────────────────────────
 def main():
     print("=" * 60)
-    print("  BTM 토픽 모델링 파이프라인")
+    print("  BTM 토픽 모델링 파이프라인 (Optuna 최적화)")
     print("=" * 60)
 
     # ── 1. bitermplus 존재 확인
@@ -467,38 +498,39 @@ def main():
     # ── 3. 어휘 구축
     vocab, docs_filtered = build_vocab(docs, min_count=2, max_ratio=0.95)
 
-    # ── 4. 최적 K 탐색
-    k_list, perplexities, coherences, best_k = search_optimal_k_btm(
-        docs_filtered, vocab,
-        k_start=K_START, k_end=K_END, k_step=K_STEP,
-        alpha=ALPHA, beta=BETA, n_iter=N_ITER,
+    # ── 4. 최적 파라미터 탐색 (2단계 Optuna)
+    # 1단계: K 결정 (엘보우 분석 포함)
+    best_k = find_best_k_sequential(docs_filtered, vocab)
+    
+    # 2단계: alpha, beta 튜닝
+    best_params, best_coh = tune_hyperparams_optuna(
+        best_k, docs_filtered, vocab, n_trials=20
     )
+    best_alpha = best_params["alpha"]
+    best_beta = best_params["beta"]
 
-    # ── 5. 최종 모델 학습
-    print(f"\n[ 최종 BTM 모델 학습 ] K={best_k}")
+    # ── 5. 최종 모델 학습 (전체 데이터 사용)
+    print(f"\n[ 최종 BTM 모델 학습 ] K={best_k}, alpha={best_alpha:.4f}, beta={best_beta:.4f}")
     model, docs_idx = train_btm(
         docs_filtered, vocab, num_topics=best_k,
-        alpha=ALPHA, beta=BETA, n_iter=N_ITER,
+        alpha=best_alpha, beta=best_beta, n_iter=N_ITER,
     )
 
     # ── 6. 결과 저장
     print("\n[ 결과 저장 ]")
     topic_word_df = save_btm_topic_words(model, vocab, best_k, topn=20)
-    doc_topic_df  = save_btm_document_topics(model, docs_idx, best_k)
+    doc_topic_df  = save_btm_document_topics(model, docs_idx, vocab, best_k)
     plot_btm_topic_word_heatmap(model, vocab, best_k, topn=10)
     plot_btm_topic_bar(model, vocab, best_k, topn=10)
     plot_btm_dominant_topic_dist(doc_topic_df, best_k)
 
-    # ── 7. K 탐색 요약 CSV
-    summary = pd.DataFrame({
-        "K":           k_list,
-        "perplexity":  perplexities,
-        "coherence":   coherences,
-        "best_k":      [best_k] * len(k_list),
-    })
-    summary.to_csv(os.path.join(OUTPUT_DIR, "BTM_K_search_summary.csv"),
-                   index=False, encoding="utf-8-sig")
-    print(f"  → 저장: {os.path.join(OUTPUT_DIR, 'BTM_K_search_summary.csv')}")
+    # ── 7. 탐색 요약 저장
+    with open(os.path.join(OUTPUT_DIR, "BTM_best_params.txt"), "w", encoding="utf-8") as f:
+        f.write(f"Best K: {best_k}\n")
+        f.write(f"Best Alpha: {best_alpha}\n")
+        f.write(f"Best Beta: {best_beta}\n")
+        f.write(f"Best Coherence: {best_coh}\n")
+    print(f"  → 저장: {os.path.join(OUTPUT_DIR, 'BTM_best_params.txt')}")
 
     # ── 8. 콘솔 요약
     id2word = {i: w for w, i in vocab.items()}
