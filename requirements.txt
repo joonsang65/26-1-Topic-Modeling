@@ -1,0 +1,13 @@
+pandas
+matplotlib
+seaborn
+scikit-learn
+kiwipiepy
+tqdm
+gensim
+pyLDAvis
+bitermplus
+openpyxl
+nltk
+numpy
+scipy
