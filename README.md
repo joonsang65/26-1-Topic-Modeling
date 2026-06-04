@@ -28,9 +28,8 @@
 ├── notebooks/                # [Step-by-Step] 데이터 처리 가이드
 │   ├── Youtube_crawl.ipynb   # 1. 원천 데이터 수집
 │   ├── preprocess.ipynb      # 2. 기초 텍스트 정제 (노이즈 제거)
-│   ├── tokenize.ipynb        # 3. 기초 형태소 분석 및 토큰화
-│   ├── adaptive_preprocess.ipynb # 4. 핵심 적응적 전처리 (최종 데이터 생성)
-│   └── final_eda.ipynb       # 5. 최종 데이터 통계 분석
+│   ├── adaptive_preprocess.ipynb # 3. 핵심 적응적 전처리 (최종 데이터 생성)
+│   └── final_eda.ipynb       # 4. 최종 데이터 통계 분석
 ├── src/                      # [Scripts] 실행 가능한 파이썬 스크립트
 │   ├── generate_eda_plots.py # EDA 결과물 자동 생성
 │   ├── LDA_topic_modeling.py # LDA 모델링 및 최적 K/Alpha 탐색
@@ -58,7 +57,7 @@ pip install -r requirements.txt
 ### 2. 분석 워크플로우 (Analysis Workflow)
 
 1.  **데이터 수집**: `notebooks/Youtube_crawl.ipynb`를 실행하여 `data/raw/`에 원본 데이터를 확보합니다.
-2.  **데이터 정제**: `preprocess.ipynb` → `tokenize.ipynb` → `adaptive_preprocess.ipynb` 순으로 실행하여 최종 데이터셋(`최종정제_v2.csv`)을 생성합니다.
+2.  **데이터 정제**: `preprocess.ipynb` → `adaptive_preprocess.ipynb` 순으로 실행하여 최종 데이터셋(`최종정제_v2.csv`)을 생성합니다.
 3.  **시각화**: 아래 명령으로 EDA 그래프를 한꺼번에 생성할 수 있습니다.
     ```bash
     python src/generate_eda_plots.py
