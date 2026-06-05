@@ -1,14 +1,21 @@
+import os
+import sys
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import Counter
 from sklearn.feature_extraction.text import CountVectorizer
-import matplotlib.font_manager as fm
-import os
+from pathlib import Path
 
-# 한글 폰트 설정 (Windows 기준)
-plt.rcParams['font.family'] = 'Malgun Gothic'
-plt.rcParams['axes.unicode_minus'] = False
+# 프로젝트 루트를 path에 추가하여 utils 임포트 가능하게 함
+root_dir = Path(__file__).resolve().parent.parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
+
+from src.utils.viz_utils import set_korean_font, save_fig
+
+# 한글 폰트 설정
+set_korean_font()
 
 def generate_eda(path_before, path_after):
     output_dir = os.path.join('results', 'figures')
@@ -21,13 +28,13 @@ def generate_eda(path_before, path_after):
     # 1. 댓글별 글자 수 분포 시각화 (최종 정제 기준)
     df_after['char_count'] = df_after['final_text'].str.len()
     
-    plt.figure(figsize=(10, 6))
-    sns.histplot(df_after['char_count'], bins=50, kde=True, color='salmon')
-    plt.title('최종 정제 댓글별 글자 수 분포', fontsize=15)
-    plt.xlabel('글자 수 (공백 포함)', fontsize=12)
-    plt.ylabel('빈도', fontsize=12)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.savefig(os.path.join(output_dir, 'eda_char_count_dist.png'), dpi=300, bbox_inches='tight')
+    fig1, ax1 = plt.subplots(figsize=(10, 6))
+    sns.histplot(df_after['char_count'], bins=50, kde=True, color='salmon', ax=ax1)
+    ax1.set_title('최종 정제 댓글별 글자 수 분포', fontsize=15)
+    ax1.set_xlabel('글자 수 (공백 포함)', fontsize=12)
+    ax1.set_ylabel('빈도', fontsize=12)
+    ax1.grid(axis='y', linestyle='--', alpha=0.7)
+    save_fig(fig1, os.path.join(output_dir, 'eda_char_count_dist.png'))
     print(f"Saved {os.path.join(output_dir, 'eda_char_count_dist.png')}")
 
     # 2. 상위 20개 단어 빈도 시각화
@@ -35,12 +42,12 @@ def generate_eda(path_before, path_after):
     word_counts = Counter(all_tokens)
     top_20_words = dict(word_counts.most_common(20))
     
-    plt.figure(figsize=(12, 8))
-    sns.barplot(x=list(top_20_words.values()), y=list(top_20_words.keys()), palette='viridis')
-    plt.title('상위 20개 단어 빈도', fontsize=15)
-    plt.xlabel('빈도', fontsize=12)
-    plt.ylabel('단어', fontsize=12)
-    plt.savefig(os.path.join(output_dir, 'eda_top20_words.png'), dpi=300, bbox_inches='tight')
+    fig2, ax2 = plt.subplots(figsize=(12, 8))
+    sns.barplot(x=list(top_20_words.values()), y=list(top_20_words.keys()), palette='viridis', ax=ax2)
+    ax2.set_title('상위 20개 단어 빈도', fontsize=15)
+    ax2.set_xlabel('빈도', fontsize=12)
+    ax2.set_ylabel('단어', fontsize=12)
+    save_fig(fig2, os.path.join(output_dir, 'eda_top20_words.png'))
     print(f"Saved {os.path.join(output_dir, 'eda_top20_words.png')}")
 
     # 3. 상위 20개 Bigram 빈도 시각화
@@ -53,12 +60,12 @@ def generate_eda(path_before, path_after):
     top_20_idx = count_values.argsort()[::-1][:20]
     top_20_bigrams = {idx_to_word[idx]: count_values[idx] for idx in top_20_idx}
     
-    plt.figure(figsize=(12, 8))
-    sns.barplot(x=list(top_20_bigrams.values()), y=list(top_20_bigrams.keys()), palette='magma')
-    plt.title('상위 20개 Bigram 빈도', fontsize=15)
-    plt.xlabel('빈도', fontsize=12)
-    plt.ylabel('Bigram', fontsize=12)
-    plt.savefig(os.path.join(output_dir, 'eda_top20_bigrams.png'), dpi=300, bbox_inches='tight')
+    fig3, ax3 = plt.subplots(figsize=(12, 8))
+    sns.barplot(x=list(top_20_bigrams.values()), y=list(top_20_bigrams.keys()), palette='magma', ax=ax3)
+    ax3.set_title('상위 20개 Bigram 빈도', fontsize=15)
+    ax3.set_xlabel('빈도', fontsize=12)
+    ax3.set_ylabel('Bigram', fontsize=12)
+    save_fig(fig3, os.path.join(output_dir, 'eda_top20_bigrams.png'))
     print(f"Saved {os.path.join(output_dir, 'eda_top20_bigrams.png')}")
 
     # 4. 지표 계산 및 표 출력

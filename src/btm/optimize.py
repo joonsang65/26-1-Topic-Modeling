@@ -6,7 +6,7 @@ BTM 2단계: 파라미터 최적화 및 최종 학습
 """
 
 import os
-import ast
+import sys
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,40 +15,41 @@ import optuna
 from tqdm import tqdm
 from scipy import sparse
 import bitermplus as btm
+from pathlib import Path
+
+# 프로젝트 루트를 path에 추가하여 utils 임포트 가능하게 함
+root_dir = Path(__file__).resolve().parent.parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
+
+from src.utils.data_io import parse_token_cell, get_best_text_column
+from src.utils.viz_utils import set_korean_font
+
+# 한글 폰트 설정
+set_korean_font()
 
 # ─────────────────────────────────────────────
-# 0. 설정값 (K값은 분석 결과에 따라 수정하세요)
+# 0. 설정값 (K값 리스트를 입력하세요)
 # ─────────────────────────────────────────────
-
-SELECTED_K = 8  # <--- 1단계 실행 후 결정된 K값을 여기에 입력하세요.
+K_LIST = [3, 4, 5]  # 분석하고 싶은 K값들을 리스트로 입력
 
 DATA_DIR    = os.path.join("data", "processed")
 TARGET_FILE = os.path.join(DATA_DIR, "최종정제_v2.csv")
-OUTPUT_DIR  = os.path.join("results", "modeling_results", "BTM", f"step2_K{SELECTED_K}")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+BASE_OUTPUT_DIR = os.path.join("results", "modeling_results", "BTM")
+os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
 
-N_TRIALS = 5        # [30]
-N_ITER = 1        # [200]
-N_ITER_OPTIM = 1   # [100]
+N_TRIALS = 30       # [30]
+N_ITER = 200        # [200]
+N_ITER_OPTIM = 100  # [100]
 RANDOM_SEED = 42
 
 # ─────────────────────────────────────────────
 # 1. 데이터 로더 (기존 로직 유지)
 # ─────────────────────────────────────────────
-def _parse_token_cell(cell) -> list:
-    if isinstance(cell, list): return [str(t).strip() for t in cell if str(t).strip()]
-    s = str(cell).strip()
-    if not s or s in ("nan", "None", ""): return []
-    if s.startswith("["):
-        try:
-            parsed = ast.literal_eval(s)
-            if isinstance(parsed, list): return [str(t).strip() for t in parsed if str(t).strip()]
-        except: pass
-    return s.split()
-
 def load_documents():
     df = pd.read_csv(TARGET_FILE, encoding="utf-8-sig")
-    docs = [_parse_token_cell(v) for v in df['final_text']]
+    col = get_best_text_column(df)
+    docs = [parse_token_cell(v) for v in df[col]]
     return [d for d in docs if len(d) >= 2]
 
 def build_vocab(docs: list, min_count: int = 2):
@@ -104,7 +105,7 @@ def custom_coherence(topic_words, X, M=10):
     # 모든 토픽들의 평균 점수들을 다시 전체 평균 내어 최종 반환
     return np.mean(coherence_scores)
 
-def optimize_params(docs_filtered, vocab):
+def optimize_params(docs_filtered, vocab, k):
     import random
     random.seed(RANDOM_SEED)
     
@@ -136,7 +137,7 @@ def optimize_params(docs_filtered, vocab):
         alpha = trial.suggest_float("alpha", 0.001, 1.0, log=True)
         beta  = trial.suggest_float("beta", 0.0001, 0.1, log=True)
 
-        model = btm.BTM(X_sample, vocab_list, T=SELECTED_K, M=20, alpha=alpha, beta=beta, seed=RANDOM_SEED)
+        model = btm.BTM(X_sample, vocab_list, T=k, M=20, alpha=alpha, beta=beta, seed=RANDOM_SEED)
         model.fit(biterms_sample, iterations=N_ITER_OPTIM)
         
         # 확률 행렬은 64비트 실수로 고정
@@ -147,7 +148,7 @@ def optimize_params(docs_filtered, vocab):
         
         return coh - (alpha * 1e-5) - (beta * 1e-4)
 
-    print(f"\n[ Optuna 최적화 시작 ] K={SELECTED_K}")
+    print(f"\n[ Optuna 최적화 시작 ] K={k}")
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED))
     study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1, show_progress_bar=True)
     
@@ -165,63 +166,67 @@ def main():
     docs = load_documents()
     vocab, docs_filtered = build_vocab(docs)
     
-    # ── 1. 파라미터 최적화
-    best_params = optimize_params(docs_filtered, vocab)
-    alpha, beta = best_params['alpha'], best_params['beta']
-    
-    # ── 2. 최종 모델 학습 (전체 데이터)
-    print(f"\n[ 최종 모델 학습 ] K={SELECTED_K}, Alpha={alpha:.4f}, Beta={beta:.4f}")
-    docs_idx = [[vocab[w] for w in doc] for doc in docs_filtered]
-    rows, cols, data = [], [], []
-    for i, doc in enumerate(docs_idx):
-        for word_id in doc: rows.append(i); cols.append(word_id); data.append(1)
-    
-    # 데이터는 float64, 인덱스는 int32로 설정합니다.
-    X = sparse.csr_matrix(
-        (np.array(data, dtype=np.int32), 
-         (np.array(rows, dtype=np.int32), np.array(cols, dtype=np.int32))), 
-        shape=(len(docs_idx), len(vocab))
-    )
-    X.indices = X.indices.astype(np.int32)
-    X.indptr = X.indptr.astype(np.int32)
-    
-    biterms = btm.get_biterms(docs_idx)
-    
-    vocab_list = np.array([None] * len(vocab), dtype=object)
-    for w, i in vocab.items(): vocab_list[i] = w
+    for k in K_LIST:
+        OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, f"step2_K{k}")
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        
+        # ── 1. 파라미터 최적화
+        best_params = optimize_params(docs_filtered, vocab, k)
+        alpha, beta = best_params['alpha'], best_params['beta']
+        
+        # ── 2. 최종 모델 학습 (전체 데이터)
+        print(f"\n[ 최종 모델 학습 ] K={k}, Alpha={alpha:.4f}, Beta={beta:.4f}")
+        docs_idx = [[vocab[w] for w in doc] for doc in docs_filtered]
+        rows, cols, data = [], [], []
+        for i, doc in enumerate(docs_idx):
+            for word_id in doc: rows.append(i); cols.append(word_id); data.append(1)
+        
+        # 데이터는 float64, 인덱스는 int32로 설정합니다.
+        X = sparse.csr_matrix(
+            (np.array(data, dtype=np.int32), 
+             (np.array(rows, dtype=np.int32), np.array(cols, dtype=np.int32))), 
+            shape=(len(docs_idx), len(vocab))
+        )
+        X.indices = X.indices.astype(np.int32)
+        X.indptr = X.indptr.astype(np.int32)
+        
+        biterms = btm.get_biterms(docs_idx)
+        
+        vocab_list = np.array([None] * len(vocab), dtype=object)
+        for w, i in vocab.items(): vocab_list[i] = w
 
-    model = btm.BTM(X, vocab_list, T=SELECTED_K, M=20, alpha=alpha, beta=beta, seed=RANDOM_SEED)
-    model.fit(biterms, iterations=N_ITER)
+        model = btm.BTM(X, vocab_list, T=k, M=20, alpha=alpha, beta=beta, seed=RANDOM_SEED)
+        model.fit(biterms, iterations=N_ITER)
 
-    # ── 3. 결과 저장
-    print("\n[ 결과 저장 ]")
-    # 토픽 단어 저장
-    phi = model.matrix_topics_words_
-    id2word = {i: w for w, i in vocab.items()}
-    topic_rows = []
-    for k in range(SELECTED_K):
-        top_ids = np.argsort(phi[k, :])[-20:][::-1]
-        for rank, wid in enumerate(top_ids, 1):
-            topic_rows.append({"topic": k+1, "rank": rank, "word": id2word[wid], "prob": phi[k, wid]})
-    pd.DataFrame(topic_rows).to_csv(os.path.join(OUTPUT_DIR, "BTM_topic_words.csv"), index=False, encoding="utf-8-sig")
+        # ── 3. 결과 저장
+        print(f"\n[ 결과 저장 ] K={k}")
+        # 토픽 단어 저장
+        phi = model.matrix_topics_words_
+        id2word = {i: w for w, i in vocab.items()}
+        topic_rows = []
+        for t in range(k):
+            top_ids = np.argsort(phi[t, :])[-20:][::-1]
+            for rank, wid in enumerate(top_ids, 1):
+                topic_rows.append({"topic": t+1, "rank": rank, "word": id2word[wid], "prob": phi[t, wid]})
+        pd.DataFrame(topic_rows).to_csv(os.path.join(OUTPUT_DIR, f"BTM_topic_words_K{k}.csv"), index=False, encoding="utf-8-sig")
 
-    # 문서 토픽 저장
-    # transform 함수에도 안전하게 int32로 캐스팅하여 전달
+        # 문서 토픽 저장
+        docs_vec = [np.array(doc, dtype=np.int32) for doc in docs_idx]
+        theta = model.transform(docs_vec)
+        doc_rows = []
+        for doc_id, dist in enumerate(theta):
+            row = {"doc_id": doc_id, "dominant_topic": np.argmax(dist) + 1}
+            for t in range(k): row[f"topic_{t+1}"] = dist[t]
+            doc_rows.append(row)
+        pd.DataFrame(doc_rows).to_csv(os.path.join(OUTPUT_DIR, f"BTM_document_topics_K{k}.csv"), index=False, encoding="utf-8-sig")
 
-    docs_vec = [np.array(doc, dtype=np.int32) for doc in docs_idx]
-    theta = model.transform(docs_vec)
-    doc_rows = []
-    for doc_id, dist in enumerate(theta):
-        row = {"doc_id": doc_id, "dominant_topic": np.argmax(dist) + 1}
-        for k in range(SELECTED_K): row[f"topic_{k+1}"] = dist[k]
-        doc_rows.append(row)
-    pd.DataFrame(doc_rows).to_csv(os.path.join(OUTPUT_DIR, "BTM_document_topics.csv"), index=False, encoding="utf-8-sig")
+        # 설정값 저장
+        with open(os.path.join(OUTPUT_DIR, f"BTM_final_params_K{k}.txt"), "w") as f:
+            f.write(f"K: {k}\nAlpha: {alpha}\nBeta: {beta}\n")
 
-    # 설정값 저장
-    with open(os.path.join(OUTPUT_DIR, "BTM_final_params.txt"), "w") as f:
-        f.write(f"K: {SELECTED_K}\nAlpha: {alpha}\nBeta: {beta}\n")
+        print(f"K={k} 완료! 결과 폴더: {OUTPUT_DIR}")
 
-    print(f"완료! 결과 폴더: {OUTPUT_DIR}")
+    print("\n[ 모든 K에 대해 작업이 완료되었습니다. ]")
 
 if __name__ == "__main__":
     main()

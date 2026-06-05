@@ -15,16 +15,24 @@ LDA 토픽 모델링을 수행합니다.
 
 import os
 import re
-import ast
+import sys
 import warnings
 import pandas as pd
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")          # 서버/비대화형 환경에서도 동작
 import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
 import seaborn as sns
 from tqdm import tqdm
+from pathlib import Path
+
+# 프로젝트 루트를 path에 추가하여 utils 임포트 가능하게 함
+root_dir = Path(__file__).resolve().parent.parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
+
+from src.utils.data_io import parse_token_cell, get_best_text_column
+from src.utils.viz_utils import set_korean_font, save_fig
 
 import gensim
 from gensim import corpora
@@ -58,54 +66,13 @@ ITERATIONS   = 400
 RANDOM_STATE = 42
 WORKERS      = 2        # LdaMulticore 사용 시 (None → LdaModel 단일 스레드)
 
-# 한글 폰트 설정 (윈도우 기본)
-try:
-    FONT_PATH = "C:/Windows/Fonts/malgun.ttf"
-    font_prop = fm.FontProperties(fname=FONT_PATH)
-    plt.rcParams["font.family"] = font_prop.get_name()
-except Exception:
-    plt.rcParams["font.family"] = "DejaVu Sans"
-plt.rcParams["axes.unicode_minus"] = False
+# 한글 폰트 설정
+set_korean_font()
 
 
 # ─────────────────────────────────────────────
 # 1. 데이터 로드
 # ─────────────────────────────────────────────
-def _parse_token_cell(cell) -> list:
-    """셀 값을 토큰 리스트로 변환 (문자열·리스트 양쪽 처리)"""
-    if isinstance(cell, list):
-        return [str(t).strip() for t in cell if str(t).strip()]
-    s = str(cell).strip()
-    if not s or s in ("nan", "None", ""):
-        return []
-    # 파이썬 리스트 표현식 ["a","b",...] 이면 ast 파싱
-    if s.startswith("["):
-        try:
-            parsed = ast.literal_eval(s)
-            if isinstance(parsed, list):
-                return [str(t).strip() for t in parsed if str(t).strip()]
-        except Exception:
-            pass
-    # 그 외: 공백 구분 토큰
-    return s.split()
-
-
-def _best_text_column(df: pd.DataFrame) -> str:
-    """토큰화된 텍스트가 담긴 컬럼을 자동 선택"""
-    candidates = []
-    for col in df.columns:
-        sample = df[col].dropna().head(5)
-        lengths = sample.apply(lambda x: len(_parse_token_cell(x)))
-        if lengths.mean() >= 2:
-            candidates.append((col, lengths.mean()))
-    if not candidates:
-        raise ValueError("토큰화된 텍스트 컬럼을 찾지 못했습니다. 컬럼 이름을 직접 지정해 주세요.")
-    # 평균 토큰 수가 가장 많은 컬럼 선택
-    candidates.sort(key=lambda x: -x[1])
-    print(f"  → 텍스트 컬럼 자동 선택: '{candidates[0][0]}'")
-    return candidates[0][0]
-
-
 def load_documents(data_dir: str) -> list:
     """
     data_dir 안의 모든 csv/txt/xlsx 파일을 읽어
@@ -128,13 +95,13 @@ def load_documents(data_dir: str) -> list:
 
         elif ext == "csv":
             df  = pd.read_csv(fpath, encoding="utf-8-sig")
-            col = _best_text_column(df)
-            docs = [_parse_token_cell(v) for v in df[col]]
+            col = get_best_text_column(df)
+            docs = [parse_token_cell(v) for v in df[col]]
 
         else:  # xlsx / xls
             df  = pd.read_excel(fpath)
-            col = _best_text_column(df)
-            docs = [_parse_token_cell(v) for v in df[col]]
+            col = get_best_text_column(df)
+            docs = [parse_token_cell(v) for v in df[col]]
 
         docs = [d for d in docs if len(d) >= 2]
         print(f"     문서 수: {len(docs)}")

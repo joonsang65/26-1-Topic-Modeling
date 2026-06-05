@@ -1,7 +1,16 @@
+import os
+import sys
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import os
+from pathlib import Path
+
+# 프로젝트 루트를 path에 추가하여 utils 임포트 가능하게 함
+root_dir = Path(__file__).resolve().parent.parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
+
+from src.utils.viz_utils import set_korean_font, save_fig
 
 # ─────────────────────────────────────────────
 # 0. 설정
@@ -9,6 +18,9 @@ import os
 CSV_PATH = os.path.join("results", "modeling_results", "BTM", "step1_k_search", "BTM_K_metrics_summary.csv")
 OUTPUT_DIR = os.path.join("results", "modeling_results", "BTM", "step1_k_search")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 한글 폰트 설정
+set_korean_font()
 
 def generate_2x2_plots():
     if not os.path.exists(CSV_PATH):
@@ -18,11 +30,6 @@ def generate_2x2_plots():
     # 데이터 로드
     df = pd.read_csv(CSV_PATH)
     
-    # 그래프 스타일 설정
-    sns.set_style("whitegrid")
-    plt.rcParams["font.family"] = "Malgun Gothic" # 한글 폰트 설정
-    plt.rcParams["axes.unicode_minus"] = False
-
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     fig.suptitle("BTM Topic Modeling: Multi-Metric K Analysis (2x2)", fontsize=16, y=0.95)
 
@@ -54,11 +61,13 @@ def generate_2x2_plots():
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
     save_path = os.path.join(OUTPUT_DIR, "BTM_K_2x2_analysis.png")
-    plt.savefig(save_path, dpi=200)
-    plt.close()
+    save_fig(fig, save_path, dpi=200)
     
     print(f"\n[시각화 완료]")
     print(f"  → 2x2 분석 그래프 저장: {save_path}")
+
+if __name__ == "__main__":
+    generate_2x2_plots()
 
 if __name__ == "__main__":
     generate_2x2_plots()
