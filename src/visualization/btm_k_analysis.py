@@ -1,6 +1,7 @@
 import os
 import sys
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
@@ -29,6 +30,7 @@ def generate_2x2_plots():
 
     # 데이터 로드
     df = pd.read_csv(CSV_PATH)
+    df['Perplexity_plot'] = df['Perplexity'].where(np.isfinite(df['Perplexity']) & (df['Perplexity'] < 1e100))
     
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     fig.suptitle("BTM Topic Modeling: Multi-Metric K Analysis (2x2)", fontsize=16, y=0.95)
@@ -49,7 +51,14 @@ def generate_2x2_plots():
     axes[1, 0].set_ylabel("Coherence Score")
 
     # 4. Perplexity (Complexity)
-    sns.lineplot(data=df, x='K', y='Perplexity', marker='x', ax=axes[1, 1], color='crimson')
+    if df['Perplexity_plot'].notna().any():
+        sns.lineplot(data=df, x='K', y='Perplexity_plot', marker='x', ax=axes[1, 1], color='crimson')
+    else:
+        axes[1, 1].text(
+            0.5, 0.5,
+            "Perplexity values are invalid\n(rerun src/btm/find_k.py)",
+            ha='center', va='center', transform=axes[1, 1].transAxes
+        )
     axes[1, 1].set_title("4. Perplexity (Lower is better / Model Confusion)", fontsize=12)
     axes[1, 1].set_ylabel("Perplexity Score")
 
@@ -65,9 +74,6 @@ def generate_2x2_plots():
     
     print(f"\n[시각화 완료]")
     print(f"  → 2x2 분석 그래프 저장: {save_path}")
-
-if __name__ == "__main__":
-    generate_2x2_plots()
 
 if __name__ == "__main__":
     generate_2x2_plots()

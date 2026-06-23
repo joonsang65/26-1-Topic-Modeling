@@ -71,6 +71,30 @@ def get_accurate_coherence(model, docs, dictionary, metric='c_v'):
     cm = CoherenceModel(topics=top_words, texts=docs, dictionary=dictionary, coherence=metric, processes=1)
     return float(cm.get_coherence())
 
+
+def calculate_biterm_perplexity(model, biterms, eps=1e-300):
+    """학습된 BTM의 비터름 likelihood로 perplexity를 직접 계산.
+
+    bitermplus의 model.perplexity_가 일부 환경에서 1e300 sentinel 값으로
+    고정되는 경우가 있어 K 비교용 지표를 별도로 산출한다.
+    """
+    phi = model.matrix_topics_words_
+    theta = model.theta_
+
+    log_likelihood = 0.0
+    n_biterms = 0
+
+    for doc_biterms in biterms:
+        for w1, w2 in doc_biterms:
+            prob = np.sum(theta * phi[:, w1] * phi[:, w2])
+            log_likelihood += np.log(max(float(prob), eps))
+            n_biterms += 1
+
+    if n_biterms == 0:
+        return np.nan
+
+    return float(np.exp(-log_likelihood / n_biterms))
+
 # ─────────────────────────────────────────────
 # 3. 메인 실행
 # ─────────────────────────────────────────────
@@ -125,8 +149,9 @@ def main():
         n = get_accurate_coherence(m, docs_filtered, dictionary, 'c_npmi')
         
         # Perplexity (보고용)
-        try: p = m.perplexity_
-        except: p = np.nan
+        # bitermplus의 m.perplexity_는 현재 환경에서 1e300으로 고정되어
+        # K 비교가 불가능하므로, 학습된 비터름 likelihood로 직접 계산한다.
+        p = calculate_biterm_perplexity(m, biterms)
         
         return {'K': k, 'C_umass': u, 'C_v': v, 'C_npmi': n, 'Perplexity': p}
 
